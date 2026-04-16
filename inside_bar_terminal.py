@@ -280,52 +280,106 @@ def round_to_strike(price: float, step: int = NIFTY_STRIKE_STEP) -> int:
     return int(round(price / step) * step)
 
 
-def build_option_symbol(strike: int, opt_type: str, expiry: date) -> str:
+def get_nearest_expiry_code(fyers) -> str:
     """
-    Fyers weekly format: NIFTY + YY + M(no leading zero) + DD + strike + type
-    e.g. NSE:NIFTY2642524150CE  (26 Apr 2026, strike 24150)
-    Monthly format (last Thursday of month): NIFTY + YYMON + strike + type
-    e.g. NSE:NIFTY26APR24150CE
-    We detect monthly by checking if expiry is the last Thursday of the month.
+    Fetch real expiry codes from Fyers optionchain API and return
+    the nearest upcoming one as a Fyers symbol code string.
+    Monthly: YYMON  e.g. "26APR"
+    Weekly:  YYMMDD e.g. "260423" → build_symbol converts to YYM(no zero)DD
     """
-    # Check if this is the last Thursday of the month (monthly expiry)
     import calendar
-    last_day = calendar.monthrange(expiry.year, expiry.month)[1]
-    last_thursday = max(
-        d for d in range(1, last_day + 1)
-        if date(expiry.year, expiry.month, d).weekday() == 3
-    )
-    is_monthly = (expiry.day == last_thursday)
+    _MONTHS = ["JAN","FEB","MAR","APR","MAY","JUN",
+               "JUL","AUG","SEP","OCT","NOV","DEC"]
+    today = date.today()
+    resp  = fyers.optionchain(data={"symbol": NIFTY_SPOT_SYMBOL,
+                                    "strikecount": 1, "timestamp": ""})
+    if not (resp and resp.get("s") == "ok"):
+        return None
+    raw = resp.get("data", {}).get("expiryData", [])
 
-    yy = expiry.strftime("%y")          # "26"
-    dd = expiry.strftime("%d")          # "23"
-    mm_alpha = expiry.strftime("%b").upper()  # "APR"
-    mm_num   = str(expiry.month)        # "4" no leading zero
+    from collections import defaultdict
+    parsed = []
+    for entry in raw:
+        d = entry.get("date", "")
+        try:
+            dd, mm, yyyy = d.split("-")
+            dd, mm, yyyy = int(dd), int(mm), int(yyyy)
+        except Exception:
+            continue
+        if date(yyyy, mm, dd) >= today:
+            parsed.append((yyyy % 100, mm, dd, _MONTHS[mm - 1]))
 
+    if not parsed:
+        return None
+
+    by_month = defaultdict(list)
+    for yy, mm, dd, mon in parsed:
+        by_month[(yy, mm)].append(dd)
+    last_of_month = {k: max(v) for k, v in by_month.items()}
+
+    # Pick nearest expiry
+    parsed.sort(key=lambda x: (x[0], x[1], x[2]))
+    yy, mm, dd, mon = parsed[0]
+    is_monthly = (dd == last_of_month[(yy, mm)])
     if is_monthly:
-        exp_str = f"{yy}{mm_alpha}"     # "26APR"
+        return f"{yy:02d}{mon}"           # e.g. "26APR"
     else:
-        exp_str = f"{yy}{mm_num}{dd}"   # "26423"
+        return f"{yy:02d}{mm:02d}{dd:02d}"  # e.g. "260423"
 
-    return f"NSE:NIFTY{exp_str}{strike}{opt_type.upper()}"
+
+def build_option_symbol(strike: int, opt_type: str, expiry_code: str) -> str:
+    """
+    Build Fyers option symbol from expiry_code returned by get_nearest_expiry_code.
+    Monthly code "26APR"  → NSE:NIFTY26APR24100CE
+    Weekly  code "260423" → NSE:NIFTY2642324100CE  (YYM(no-zero)DD)
+    """
+    ot = opt_type.upper()
+    code = expiry_code.strip().upper()
+    if any(c.isalpha() for c in code):
+        # Monthly — use as-is
+        exp_str = code
+    else:
+        # Weekly numeric YYMMDD → YYM(no-zero)DD
+        yy, mm, dd = code[0:2], code[2:4], code[4:6]
+        exp_str = f"{yy}{int(mm)}{dd}"
+    return f"NSE:NIFTY{exp_str}{strike}{ot}"
 
 
 def load_live_data() -> dict:
     """Fetch spot + ATM CE/PE from Fyers. Returns dict of DataFrames + meta."""
-    fyers      = get_fyers_client()
-    spot_df    = fetch_ohlc_live(fyers, NIFTY_SPOT_SYMBOL, days_back=3)
-    ltp        = float(spot_df["close"].iloc[-1])
-    atm_strike = round_to_strike(ltp)
-    expiry     = get_next_thursday()
-    ce_sym     = build_option_symbol(atm_strike, "CE", expiry)
-    pe_sym     = build_option_symbol(atm_strike, "PE", expiry)
+    fyers        = get_fyers_client()
+    spot_df      = fetch_ohlc_live(fyers, NIFTY_SPOT_SYMBOL, days_back=3)
+    ltp          = float(spot_df["close"].iloc[-1])
+    atm_strike   = round_to_strike(ltp)
+    expiry_code  = get_nearest_expiry_code(fyers) or _fallback_expiry_code()
+    ce_sym       = build_option_symbol(atm_strike, "CE", expiry_code)
+    pe_sym       = build_option_symbol(atm_strike, "PE", expiry_code)
 
     ce_df = fetch_ohlc_live(fyers, ce_sym, days_back=3)
     pe_df = fetch_ohlc_live(fyers, pe_sym, days_back=3)
 
     return dict(spot_df=spot_df, ce_df=ce_df, pe_df=pe_df,
                 ce_symbol=ce_sym, pe_symbol=pe_sym,
-                atm_strike=atm_strike, expiry=expiry)
+                atm_strike=atm_strike, expiry=expiry_code)
+
+
+def _fallback_expiry_code() -> str:
+    """Fallback: compute next Thursday expiry code without API."""
+    import calendar
+    _MONTHS = ["JAN","FEB","MAR","APR","MAY","JUN",
+               "JUL","AUG","SEP","OCT","NOV","DEC"]
+    today = date.today()
+    days_ahead = 3 - today.weekday()
+    if days_ahead <= 0:
+        days_ahead += 7
+    exp = today + timedelta(days=days_ahead)
+    yy, mm, dd = exp.year % 100, exp.month, exp.day
+    last_day = calendar.monthrange(exp.year, exp.month)[1]
+    last_thu = max(d for d in range(1, last_day+1)
+                   if date(exp.year, exp.month, d).weekday() == 3)
+    if dd == last_thu:
+        return f"{yy:02d}{_MONTHS[mm-1]}"
+    return f"{yy:02d}{mm:02d}{dd:02d}"
 
 
 # ═══════════════════════════════════════════════════════════
