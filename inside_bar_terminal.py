@@ -184,29 +184,11 @@ def _get_access_token(client_id: str, secret_key: str,
     if d4.get("s") != "ok":
         raise RuntimeError(f"auth_code step failed: {d4}")
 
-    # Step 4b: use data["auth"] + redirectUrl to get the actual auth_code
-    data4        = d4.get("data", {})
-    auth_jwt     = data4.get("auth", "")
-    redirect_url = data4.get("redirectUrl", "")
-    if not auth_jwt:
-        raise RuntimeError(f"auth JWT not found in response: {d4}")
-
-    r4b = requests.get(
-        redirect_url,
-        params={"auth_code": auth_jwt, "state": "None"},
-        allow_redirects=False, timeout=10
-    )
-    location  = r4b.headers.get("Location", "")
-    parsed_loc = urllib.parse.urlparse(location)
-    loc_params = urllib.parse.parse_qs(parsed_loc.query)
-    auth_code  = loc_params.get("auth_code", [None])[0]
+    # data["auth"] IS the auth_code — pass directly to validate-authcode
+    data4     = d4.get("data", {})
+    auth_code = data4.get("auth", "")
     if not auth_code:
-        # Some versions embed it differently — try query string of redirectUrl itself
-        parsed_redir = urllib.parse.urlparse(redirect_url)
-        redir_params = urllib.parse.parse_qs(parsed_redir.query)
-        auth_code = redir_params.get("auth_code", [None])[0]
-    if not auth_code:
-        raise RuntimeError(f"auth_code not found. Location header: {location!r} — r4b status: {r4b.status_code} — r4b body: {r4b.text[:300]}")
+        raise RuntimeError(f"auth_code not found in data.auth. Full response: {d4}")
 
     # ── Step 5: exchange auth_code for access_token ───────
     import hashlib
@@ -217,7 +199,8 @@ def _get_access_token(client_id: str, secret_key: str,
                            "appIdHash":  app_hash,
                            "code":       auth_code,
                        }, timeout=10)
-    r5.raise_for_status()
+    if not r5.ok:
+        raise RuntimeError(f"validate-authcode HTTP {r5.status_code}: {r5.text}")
     d5 = r5.json()
     if d5.get("s") != "ok":
         raise RuntimeError(f"validate-authcode failed: {d5}")
