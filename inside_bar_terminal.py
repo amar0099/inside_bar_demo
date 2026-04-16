@@ -162,22 +162,24 @@ def _get_access_token(client_id: str, secret_key: str,
     access_token_stage1 = d3["data"]["access_token"]
 
     # ── Step 4: get auth_code via token API ───────────────
-    r4 = requests.post(f"{token_url}",
+    # app_id is the full client_id string e.g. "0Z0FI0BJS0-100"
+    r4 = requests.post(token_url,
                        json={
-                           "fyers_id":     username,
-                           "app_id":       client_id.split("-")[0],
-                           "redirect_uri": redirect_uri,
-                           "appType":      "100",
+                           "fyers_id":      username,
+                           "app_id":        client_id,
+                           "redirect_uri":  redirect_uri,
+                           "appType":       "100",
                            "code_challenge":"",
-                           "state":        "None",
-                           "scope":        "",
-                           "nonce":        "",
-                           "response_type":"code",
-                           "create_cookie": True,
+                           "state":         "None",
+                           "scope":         "",
+                           "nonce":         "",
+                           "response_type": "code",
+                           "create_cookie": "True",
                        },
                        headers={"Authorization": f"Bearer {access_token_stage1}"},
                        timeout=10)
-    r4.raise_for_status()
+    if not r4.ok:
+        raise RuntimeError(f"auth_code step HTTP {r4.status_code}: {r4.text}")
     d4 = r4.json()
     if d4.get("s") != "ok":
         raise RuntimeError(f"auth_code step failed: {d4}")
@@ -214,8 +216,8 @@ def get_fyers_client():
     """
     # ── Hardcoded credentials (override secrets if set) ──
     _HARDCODED = dict(
-        client_id  = "0Z0FI0BJS0-100",
-        secret_key = "MZS89VWU3I",
+        client_id  = "CGWZXNCRYX-100",
+        secret_key = "3RL83O1MT8",
         username   = "XA03074",
         pin        = "9518",
         totp_key   = "MM3N4EAJDKRHPNEPFQXJ74LBHYLR74NK",
