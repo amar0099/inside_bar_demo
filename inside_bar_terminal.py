@@ -166,7 +166,7 @@ def _get_access_token(client_id: str, secret_key: str,
     r4 = requests.post(token_url,
                        json={
                            "fyers_id":      username,
-                           "app_id":        client_id,
+                           "app_id":        client_id.split("-")[0],
                            "redirect_uri":  redirect_uri,
                            "appType":       "100",
                            "code_challenge":"",
