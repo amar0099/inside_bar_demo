@@ -14,6 +14,7 @@ from datetime import datetime, date, timedelta, time as dtime
 from dataclasses import dataclass, field
 from typing import Optional
 import time
+import pyotp
 
 
 # ═══════════════════════════════════════════════════════════
@@ -103,109 +104,96 @@ def must_close(dt: pd.Timestamp) -> bool:
 # ═══════════════════════════════════════════════════════════
 
 def _generate_totp(totp_key: str) -> str:
-    """Generate current 6-digit TOTP from base32 secret."""
-    import hmac, hashlib, struct, base64
-    key   = base64.b32decode(totp_key.upper().replace(" ", ""))
-    ts    = int(time.time()) // 30
-    msg   = struct.pack(">Q", ts)
-    h     = hmac.new(key, msg, hashlib.sha1).digest()
-    offset = h[-1] & 0x0F
-    code  = struct.unpack(">I", h[offset:offset + 4])[0] & 0x7FFFFFFF
-    return str(code % 1_000_000).zfill(6)
+    """Generate current 6-digit TOTP using pyotp."""
+    return pyotp.TOTP(totp_key).now()
 
 
-@st.cache_resource(ttl=3600)   # cache token for 1 hour; Fyers tokens are valid for the full day
+@st.cache_resource(ttl=3600)
 def _get_access_token(client_id: str, secret_key: str,
                       username: str, pin: str, totp_key: str) -> str:
     """
-    Full Fyers API v3 automated login flow:
-      1. Generate auth URL
-      2. POST login with username + TOTP
-      3. POST verify PIN
-      4. Extract auth_code from redirect URL
-      5. Exchange auth_code for access_token
-    Returns access_token string.
+    Fyers API v3 automated login — mirrors the working dashboard.py flow exactly.
+    Uses b64-encoded credentials, send_login_otp_v2, verify_pin_v2,
+    redirect_uri=127.0.0.1, and SHA-256 appIdHash for validate-authcode.
     """
-    import requests, urllib.parse
+    import requests, hashlib, base64
+    from urllib.parse import parse_qs, urlparse
+    from fyers_apiv3 import fyersModel
 
-    session_url   = "https://api-t2.fyers.in/vagator/v2"
-    token_url     = "https://api-t1.fyers.in/api/v3/token"
-    redirect_uri  = "https://trade.fyers.in/api-login/redirect-uri/index.html"
+    def b64(v):
+        return base64.b64encode(str(v).encode()).decode()
 
-    # ── Step 1: send_login_otp (get request_key) ──────────
-    r1 = requests.post(f"{session_url}/send_login_otp",
-                       json={"fy_id": username, "app_id": "2"}, timeout=10)
-    r1.raise_for_status()
-    d1 = r1.json()
-    if d1.get("s") != "ok":
-        raise RuntimeError(f"send_login_otp failed: {d1}")
-    request_key = d1["request_key"]
+    redirect_uri = "http://127.0.0.1:8080/"
+    s = requests.Session()
+
+    # ── Step 1: send_login_otp_v2 ────────────────────────
+    r1 = s.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2",
+                json={"fy_id": b64(username), "app_id": "2"}, timeout=10)
+    if r1.status_code == 429:
+        raise RuntimeError("Rate limited by Fyers (429). Wait ~60s and retry.")
+    r1d = r1.json()
+    if r1d.get("s") != "ok":
+        raise RuntimeError(f"Step 1 failed: {r1d}")
 
     # ── Step 2: verify_otp (TOTP) ─────────────────────────
     totp = _generate_totp(totp_key)
-    r2   = requests.post(f"{session_url}/verify_otp",
-                         json={"request_key": request_key, "otp": totp}, timeout=10)
-    r2.raise_for_status()
-    d2 = r2.json()
-    if d2.get("s") != "ok":
-        raise RuntimeError(f"verify_otp failed: {d2}")
-    request_key2 = d2["request_key"]
+    r2 = s.post("https://api-t2.fyers.in/vagator/v2/verify_otp",
+                json={"request_key": r1d["request_key"], "otp": totp}, timeout=10)
+    r2d = r2.json()
+    if r2d.get("s") != "ok":
+        raise RuntimeError(f"Step 2 failed: {r2d}")
 
-    # ── Step 3: verify_pin ────────────────────────────────
-    r3 = requests.post(f"{session_url}/verify_pin",
-                       json={"request_key": request_key2,
-                             "identity_type": "pin", "identifier": pin}, timeout=10)
-    r3.raise_for_status()
-    d3 = r3.json()
-    if d3.get("s") != "ok":
-        raise RuntimeError(f"verify_pin failed: {d3}")
-    access_token_stage1 = d3["data"]["access_token"]
+    # ── Step 3: verify_pin_v2 (b64-encoded pin) ───────────
+    r3 = s.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2",
+                json={"request_key": r2d["request_key"],
+                      "identity_type": "pin", "identifier": b64(pin)}, timeout=10)
+    r3d = r3.json()
+    if r3d.get("s") != "ok":
+        raise RuntimeError(f"Step 3 failed: {r3d}")
+    access_token_stage1 = r3d["data"]["access_token"]
 
-    # ── Step 4: get auth_code via token API ───────────────
-    # app_id is the full client_id string e.g. "0Z0FI0BJS0-100"
-    r4 = requests.post(token_url,
-                       json={
-                           "fyers_id":      username,
-                           "app_id":        client_id.split("-")[0],
-                           "redirect_uri":  redirect_uri,
-                           "appType":       "100",
-                           "code_challenge":"",
-                           "state":         "None",
-                           "scope":         "",
-                           "nonce":         "",
-                           "response_type": "code",
-                           "create_cookie": "True",
-                       },
-                       headers={"Authorization": f"Bearer {access_token_stage1}"},
-                       timeout=10)
-    if not r4.ok:
-        raise RuntimeError(f"auth_code step HTTP {r4.status_code}: {r4.text}")
-    d4 = r4.json()
-    if d4.get("s") != "ok":
-        raise RuntimeError(f"auth_code step failed: {d4}")
+    # ── Step 4: get auth_code ─────────────────────────────
+    app_id = client_id.split("-")[0]
+    r4 = s.post("https://api-t1.fyers.in/api/v3/token", json={
+        "fyers_id": username, "app_id": app_id, "redirect_uri": redirect_uri,
+        "appType": "100", "code_challenge": "", "state": "sample",
+        "scope": "", "nonce": "", "response_type": "code", "create_cookie": True,
+    }, headers={"Authorization": f"Bearer {access_token_stage1}"}, timeout=10)
+    r4d = r4.json()
+    if r4d.get("s") != "ok":
+        raise RuntimeError(f"Step 4 failed: {r4d}")
 
-    # data["auth"] IS the auth_code — pass directly to validate-authcode
-    data4     = d4.get("data", {})
-    auth_code = data4.get("auth", "")
+    data = r4d.get("data", {})
+    auth_code = (
+        data.get("auth")
+        or parse_qs(urlparse(r4d.get("Url", "")).query).get("auth_code", [None])[0]
+        or parse_qs(urlparse(data.get("url", "")).query).get("auth_code", [None])[0]
+    )
     if not auth_code:
-        raise RuntimeError(f"auth_code not found in data.auth. Full response: {d4}")
+        raise RuntimeError(f"Step 4: no auth_code in response: {r4d}")
 
-    # ── Step 5: exchange auth_code for access_token ───────
-    import hashlib
-    app_hash = hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
-    r5 = requests.post("https://api-t1.fyers.in/api/v3/validate-authcode",
-                       json={
-                           "grant_type": "authorization_code",
-                           "appIdHash":  app_hash,
-                           "code":       auth_code,
-                       }, timeout=10)
-    if not r5.ok:
-        raise RuntimeError(f"validate-authcode HTTP {r5.status_code}: {r5.text}")
-    d5 = r5.json()
-    if d5.get("s") != "ok":
-        raise RuntimeError(f"validate-authcode failed: {d5}")
-
-    return d5["access_token"]
+    # ── Step 5: validate-authcode → access_token ──────────
+    app_id_hash = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
+    r5 = s.post("https://api-t1.fyers.in/api/v3/validate-authcode", json={
+        "grant_type": "authorization_code",
+        "appIdHash": app_id_hash,
+        "code": auth_code,
+    }, timeout=10)
+    r5d = r5.json()
+    token = r5d.get("access_token")
+    if not token:
+        # Fallback: SDK SessionModel
+        session = fyersModel.SessionModel(
+            client_id=client_id, secret_key=secret_key,
+            redirect_uri=redirect_uri, response_type="code",
+            grant_type="authorization_code",
+        )
+        session.set_token(auth_code)
+        r5d = session.generate_token()
+        token = r5d.get("access_token")
+    if not token:
+        raise RuntimeError(f"Step 5 failed: {r5d}")
+    return token
 
 
 def get_fyers_client():
