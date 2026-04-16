@@ -185,12 +185,15 @@ def _get_access_token(client_id: str, secret_key: str,
         raise RuntimeError(f"auth_code step failed: {d4}")
 
     # auth_code is embedded in the redirect URL as ?auth_code=...
-    redirect = d4.get("Url", "")
-    parsed   = urllib.parse.urlparse(redirect)
-    params   = urllib.parse.parse_qs(parsed.query)
+    redirect = (d4.get("Url") or d4.get("url") or d4.get("URL") or
+                (d4.get("data") or {}).get("Url") or (d4.get("data") or {}).get("url") or "")
+    if not redirect:
+        raise RuntimeError(f"No redirect URL found. Full response: {d4}")
+    parsed    = urllib.parse.urlparse(redirect)
+    params    = urllib.parse.parse_qs(parsed.query)
     auth_code = params.get("auth_code", [None])[0]
     if not auth_code:
-        raise RuntimeError(f"auth_code not found in redirect URL: {redirect}")
+        raise RuntimeError(f"auth_code not found. URL: {redirect} — full response: {d4}")
 
     # ── Step 5: exchange auth_code for access_token ───────
     import hashlib
