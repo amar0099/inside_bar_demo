@@ -907,10 +907,13 @@ with tab1:
         inst = st.selectbox("Chart", ["SPOT", "ATM CE", "ATM PE"],
                             label_visibility="collapsed")
         chart_map = {
-            "SPOT":   (df_s,                         f"NIFTY 50 SPOT — 15 MIN"),
-            "ATM CE": (st.session_state.ce_df or df_s, f"NIFTY {st.session_state.atm_strike} CE — 15 MIN"),
-            "ATM PE": (st.session_state.pe_df or df_s, f"NIFTY {st.session_state.atm_strike} PE — 15 MIN"),
+            "SPOT":   (df_s, f"NIFTY 50 SPOT — 15 MIN"),
+            "ATM CE": (df_s if st.session_state.ce_df is None else st.session_state.ce_df,
+                       f"NIFTY {st.session_state.atm_strike} CE — 15 MIN"),
+            "ATM PE": (df_s if st.session_state.pe_df is None else st.session_state.pe_df,
+                       f"NIFTY {st.session_state.atm_strike} PE — 15 MIN"),
         }
+        
         c_df, c_title = chart_map[inst]
 
         fig = build_ohlc_chart(c_df, st.session_state.setups,
