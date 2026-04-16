@@ -123,7 +123,7 @@ def _get_access_token(client_id: str, secret_key: str,
     def b64(v):
         return base64.b64encode(str(v).encode()).decode()
 
-    redirect_uri = "http://127.0.0.1:8080/"
+    redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
     s = requests.Session()
 
     # ── Step 1: send_login_otp_v2 ────────────────────────
