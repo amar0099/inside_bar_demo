@@ -123,7 +123,7 @@ def _get_access_token(client_id: str, secret_key: str,
     def b64(v):
         return base64.b64encode(str(v).encode()).decode()
 
-    redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
+    redirect_uri = "http://127.0.0.1:8080/"
     s = requests.Session()
 
     # ── Step 1: send_login_otp_v2 ────────────────────────
@@ -156,7 +156,7 @@ def _get_access_token(client_id: str, secret_key: str,
     app_id = client_id.split("-")[0]
     token  = None
 
-    for redir in ["http://127.0.0.1:8080/", redirect_uri]:
+    for redir in ["http://127.0.0.1:8080/"]:
         r4 = s.post("https://api-t1.fyers.in/api/v3/token", json={
             "fyers_id": username, "app_id": app_id, "redirect_uri": redir,
             "appType": "100", "code_challenge": "", "state": "sample",
