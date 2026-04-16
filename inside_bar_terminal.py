@@ -152,55 +152,56 @@ def _get_access_token(client_id: str, secret_key: str,
         raise RuntimeError(f"Step 3 failed: {r3d}")
     access_token_stage1 = r3d["data"]["access_token"]
 
-    # ── Step 4+5: SDK SessionModel handles auth_code exchange ──
-    # stage1 access_token from vagator is passed to SessionModel
-    # which internally does the token + validate-authcode flow
-    from fyers_apiv3.fyersModel import SessionModel
-    session = SessionModel(
-        client_id=client_id,
-        secret_key=secret_key,
-        redirect_uri=redirect_uri,
-        response_type="code",
-        grant_type="authorization_code",
-    )
-    session.set_token(access_token_stage1)
-    r45 = session.generate_token()
-    token = r45.get("access_token")
-    if token:
-        return token
-
-    # Fallback: manual Step 4 + Step 5 with raw HTTP
+    # ── Step 4: try both redirect URIs — 127.0.0.1 works for auth_code extraction
     app_id = client_id.split("-")[0]
-    r4 = s.post("https://api-t1.fyers.in/api/v3/token", json={
-        "fyers_id": username, "app_id": app_id, "redirect_uri": redirect_uri,
-        "appType": "100", "code_challenge": "", "state": "sample",
-        "scope": "", "nonce": "", "response_type": "code", "create_cookie": True,
-    }, headers={"Authorization": f"Bearer {access_token_stage1}"}, timeout=10)
-    r4d = r4.json()
-    if r4d.get("s") != "ok":
-        raise RuntimeError(f"Step 4 failed: {r4d}")
+    token  = None
 
-    data    = r4d.get("data", {})
-    auth_code = (
-        data.get("auth")
-        or parse_qs(urlparse(r4d.get("Url", "")).query).get("auth_code", [None])[0]
-        or parse_qs(urlparse(data.get("url",  "")).query).get("auth_code", [None])[0]
-        or parse_qs(urlparse(data.get("redirectUrl", "")).query).get("auth_code", [None])[0]
-    )
-    if not auth_code:
-        raise RuntimeError(f"Step 4: no auth_code found. Full response: {r4d}")
+    for redir in ["http://127.0.0.1:8080/", redirect_uri]:
+        r4 = s.post("https://api-t1.fyers.in/api/v3/token", json={
+            "fyers_id": username, "app_id": app_id, "redirect_uri": redir,
+            "appType": "100", "code_challenge": "", "state": "sample",
+            "scope": "", "nonce": "", "response_type": "code", "create_cookie": True,
+        }, headers={"Authorization": f"Bearer {access_token_stage1}"}, timeout=10)
+        r4d = r4.json()
+        if r4d.get("s") != "ok":
+            continue
 
-    app_id_hash = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
-    r5 = s.post("https://api-t1.fyers.in/api/v3/validate-authcode", json={
-        "grant_type": "authorization_code",
-        "appIdHash": app_id_hash,
-        "code": auth_code,
-    }, timeout=10)
-    r5d = r5.json()
-    token = r5d.get("access_token")
-    if not token:
-        raise RuntimeError(f"Step 5 failed: {r5d}")
-    return token
+        data = r4d.get("data", {})
+        auth_code = (
+            data.get("auth")
+            or parse_qs(urlparse(r4d.get("Url", "")).query).get("auth_code", [None])[0]
+            or parse_qs(urlparse(data.get("url",  "")).query).get("auth_code", [None])[0]
+            or parse_qs(urlparse(data.get("redirectUrl", "")).query).get("auth_code", [None])[0]
+        )
+        if not auth_code:
+            continue
+
+        # ── Step 5: validate-authcode ─────────────────────
+        app_id_hash = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
+        r5 = s.post("https://api-t1.fyers.in/api/v3/validate-authcode", json={
+            "grant_type": "authorization_code",
+            "appIdHash": app_id_hash,
+            "code": auth_code,
+        }, timeout=10)
+        r5d = r5.json()
+        token = r5d.get("access_token")
+        if token:
+            return token
+
+        # Fallback: SDK SessionModel with same auth_code
+        from fyers_apiv3.fyersModel import SessionModel
+        session = SessionModel(
+            client_id=client_id, secret_key=secret_key,
+            redirect_uri=redir, response_type="code",
+            grant_type="authorization_code",
+        )
+        session.set_token(auth_code)
+        r5d = session.generate_token()
+        token = r5d.get("access_token")
+        if token:
+            return token
+
+    raise RuntimeError(f"Login failed after all attempts. Last r4d: {r4d} Last r5d: {r5d}")
 
 
 def get_fyers_client():
