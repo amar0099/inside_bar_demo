@@ -1242,6 +1242,28 @@ with st.sidebar:
         )
 
     st.markdown('<div class="section-label">Actions</div>', unsafe_allow_html=True)
+
+    # Refresh Signals — live mode only: re-fetches 1-min and rescans
+    if not is_demo:
+        if st.button("🔄  Refresh Signals", use_container_width=True):
+            df = st.session_state.spot_df
+            if df is not None:
+                try:
+                    with st.spinner("Fetching latest 1-min data…"):
+                        fyers  = get_fyers_client()
+                        cfg    = INSTRUMENT_CONFIG[st.session_state.get("selected_instrument","Nifty")]
+                        df1    = fetch_ohlc_1min_live(fyers, cfg["spot_symbol"])
+                        st.session_state.spot_1m_df = df1
+                        ema_map = st.session_state.ema_map
+                        setups  = st.session_state.setups
+                        signals = generate_signals_live(df, setups, df1, ema_map)
+                        st.session_state.signals = signals
+                        log(f"Signals refreshed: {len(signals)} found (1-min)", "INFO")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+                    log(str(e), "ERROR")
+
     if st.button("📋  Run Full Backtest", use_container_width=True):
         df = st.session_state.spot_df
         if df is not None:
