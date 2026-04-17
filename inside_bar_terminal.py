@@ -1134,7 +1134,7 @@ if df_s is not None:
 #  TABS
 # ═══════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4 = st.tabs(["📈  Chart & Demo", "📋  Trade Log", "🔍  Backtest", "📟  Log"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈  Chart & Demo", "📋  Trade Log", "🔍  Backtest", "📟  Log", "🕯️  Signal Candles"])
 
 # ── TAB 1 : CHART & DEMO ─────────────────────────────────
 with tab1:
@@ -1307,6 +1307,97 @@ with tab3:
                  "entry_price","sl","target","exit_price","exit_reason","pnl_pts"]],
             use_container_width=True, height=320,
         )
+
+# ── TAB 5 : SIGNAL CANDLES ──────────────────────────────
+with tab5:
+    df_s5   = st.session_state.spot_df
+    signals = st.session_state.signals
+
+    if df_s5 is None or not signals:
+        st.markdown(
+            '<div style="color:#3a5a7a;font-family:IBM Plex Mono;font-size:0.8rem;'
+            'padding:30px 0;text-align:center;">'
+            'No signals detected yet. Load data first.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown('<div class="section-label">Signal Candles — OHLC Context</div>',
+                    unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:#7a9ab8;'
+            'margin-bottom:12px;">'
+            'Shows candles from Mother Bar through Entry candle + 1 for each detected signal.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        rows = []
+        for sig in signals:
+            setup      = sig.setup
+            mother_idx = setup.mother_idx
+            # Entry candle idx + 1 (the candle after entry)
+            end_idx    = min(sig.signal_candle_idx + 2, len(df_s5))
+
+            for idx in range(mother_idx, end_idx):
+                candle = df_s5.iloc[idx]
+                if idx == mother_idx:
+                    role = "Mother"
+                elif idx == setup.baby_idx:
+                    role = "Baby"
+                elif idx == sig.signal_candle_idx:
+                    role = "Entry"
+                elif idx == sig.signal_candle_idx + 1:
+                    role = "Post-Entry"
+                else:
+                    role = "—"
+
+                rows.append({
+                    "Signal#"   : signals.index(sig) + 1,
+                    "Direction" : sig.direction,
+                    "Role"      : role,
+                    "DateTime"  : candle["datetime"].strftime("%d %b  %H:%M"),
+                    "Open"      : round(float(candle["open"]),  2),
+                    "High"      : round(float(candle["high"]),  2),
+                    "Low"       : round(float(candle["low"]),   2),
+                    "Close"     : round(float(candle["close"]), 2),
+                    "Range"     : round(float(candle["high"]) - float(candle["low"]), 2),
+                    "Entry"     : round(sig.entry_trigger, 2) if role == "Entry" else "",
+                    "SL"        : round(sig.stop_loss,     2) if role == "Entry" else "",
+                    "Target"    : round(sig.target,        2) if role == "Entry" else "",
+                })
+
+        if rows:
+            sc_df = pd.DataFrame(rows)
+
+            # Color-code by role using pandas styler
+            def color_role(val):
+                colors = {
+                    "Mother"     : "background-color:#e8f0fe;color:#1a56db;font-weight:600",
+                    "Baby"       : "background-color:#fff8e1;color:#c68000;font-weight:600",
+                    "Entry"      : "background-color:#e6f9ee;color:#1a7a3a;font-weight:700",
+                    "Post-Entry" : "background-color:#f5f7fa;color:#5a7a9a",
+                }
+                return colors.get(val, "")
+
+            def color_direction(val):
+                if val == "LONG":  return "color:#1a7a3a;font-weight:700"
+                if val == "SHORT": return "color:#c0392b;font-weight:700"
+                return ""
+
+            styled = sc_df.style                 .applymap(color_role,      subset=["Role"])                 .applymap(color_direction, subset=["Direction"])
+
+            st.dataframe(styled, use_container_width=True, height=520)
+
+            # Download button
+            csv = sc_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇ Download CSV",
+                data=csv,
+                file_name="signal_candles.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info("No candle data available for current signals.")
 
 # ── TAB 4 : LOG ──────────────────────────────────────────
 with tab4:
