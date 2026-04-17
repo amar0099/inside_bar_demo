@@ -281,6 +281,28 @@ def fetch_ohlc_live(fyers, symbol: str, days_back: int = 3) -> pd.DataFrame:
     return df[df["datetime"] >= cutoff].reset_index(drop=True)
 
 
+def fetch_ohlc_1min_live(fyers, symbol: str) -> pd.DataFrame:
+    """Fetch today's 1-min candles for live signal confirmation."""
+    today = date.today()
+    resp  = fyers.history(data={
+        "symbol":     symbol,
+        "resolution": "1",
+        "date_format":"1",
+        "range_from": today.strftime("%Y-%m-%d"),
+        "range_to":   today.strftime("%Y-%m-%d"),
+        "cont_flag":  "1",
+    })
+    if resp.get("s") != "ok":
+        return pd.DataFrame()
+    df = pd.DataFrame(resp["candles"], columns=["ts","open","high","low","close","volume"])
+    df["datetime"] = (
+        pd.to_datetime(df["ts"], unit="s", utc=True)
+        .dt.tz_convert("Asia/Kolkata")
+        .dt.tz_localize(None)
+    )
+    return df.drop(columns=["ts"]).sort_values("datetime").reset_index(drop=True)
+
+
 def fetch_ltp_live(fyers, symbol: str) -> float:
     resp = fyers.quotes(data={"symbols": symbol})
     if resp.get("s") != "ok":
@@ -387,29 +409,31 @@ def build_option_symbol(strike: int, opt_type: str, expiry_code: str,
 
 
 def load_live_data() -> dict:
-    """Fetch spot + ATM CE/PE from Fyers for selected instrument."""
+    """Fetch spot + ATM CE/PE + 1-min data from Fyers for selected instrument."""
     instrument = st.session_state.get("selected_instrument", "Nifty")
     cfg        = INSTRUMENT_CONFIG[instrument]
     spot_sym   = cfg["spot_symbol"]
     step       = cfg["strike_step"]
 
     fyers = get_fyers_client()
-    st.session_state["_fyers_cfg"]    = {"client_id": fyers.client_id, "token": fyers.token}
-    st.session_state["_spot_symbol"]  = spot_sym
+    st.session_state["_fyers_cfg"]   = {"client_id": fyers.client_id, "token": fyers.token}
+    st.session_state["_spot_symbol"] = spot_sym
 
-    spot_df    = fetch_ohlc_live(fyers, spot_sym, days_back=3)
-    ltp        = float(spot_df["close"].iloc[-1])
-    atm_strike = round_to_strike(ltp, step)
+    spot_df     = fetch_ohlc_live(fyers, spot_sym, days_back=3)
+    spot_1m_df  = fetch_ohlc_1min_live(fyers, spot_sym)   # today's 1-min data
+    ltp         = float(spot_df["close"].iloc[-1])
+    atm_strike  = round_to_strike(ltp, step)
     expiry_code = get_nearest_expiry_code(fyers)
-    ce_sym     = build_option_symbol(atm_strike, "CE", expiry_code, instrument)
-    pe_sym     = build_option_symbol(atm_strike, "PE", expiry_code, instrument)
+    ce_sym      = build_option_symbol(atm_strike, "CE", expiry_code, instrument)
+    pe_sym      = build_option_symbol(atm_strike, "PE", expiry_code, instrument)
 
     ce_df = fetch_ohlc_live(fyers, ce_sym, days_back=3)
     pe_df = fetch_ohlc_live(fyers, pe_sym, days_back=3)
 
     return dict(spot_df=spot_df, ce_df=ce_df, pe_df=pe_df,
                 ce_symbol=ce_sym, pe_symbol=pe_sym,
-                atm_strike=atm_strike, expiry=expiry_code)
+                atm_strike=atm_strike, expiry=expiry_code,
+                spot_1m_df=spot_1m_df)
 
 
 def _fallback_expiry_code() -> str:
@@ -575,17 +599,20 @@ def generate_signals(df: pd.DataFrame,
                      setups: list[InsideBarSetup],
                      ema_map: dict | None = None) -> list[TradeSignal]:
     """
-    Generate trade signals with filters:
-    - Same-day breakout only
-    - Max risk <= MAX_RISK_PCT (1.5%) of entry
-    - Trend filter: LONG only above EMA20, SHORT only below EMA20
-    - If ANY breakout fires against the trend, the entire setup is dead.
-      Do not re-enter on reversal — wait for a fresh inside bar.
+    Signal logic:
+    - Watch candles after baby close for 15-min CLOSE above/below mother high/low
+    - When a 15-min candle CLOSES above mother high → LONG signal
+    - When a 15-min candle CLOSES below mother low  → SHORT signal
+    - Entry = next 15-min candle open (candle after close confirmation)
+    - SL    = mother low/high (fixed)
+    - Target = entry + 2 × (entry - SL)
+    - If close is against trend → setup dead
+    - If same candle closes both sides → setup dead
     """
     signals = []
     n = len(df)
     for setup in setups:
-        setup_date = df.iloc[setup.baby_idx]["datetime"].date()
+        setup_date    = df.iloc[setup.baby_idx]["datetime"].date()
         setup_invalidated = False
 
         for k in range(setup.baby_idx + 1,
@@ -596,49 +623,159 @@ def generate_signals(df: pd.DataFrame,
             if not can_enter(c["datetime"]):
                 break
 
-            # Check if price has broken either side of mother bar
-            broke_high = c["high"] > setup.mother_high
-            broke_low  = c["low"]  < setup.mother_low
+            # Use CLOSE for confirmation — not intracandle high/low
+            closed_above = float(c["close"]) > setup.mother_high
+            closed_below = float(c["close"]) < setup.mother_low
 
-            if not broke_high and not broke_low:
-                continue  # no breakout yet, keep watching
+            if not closed_above and not closed_below:
+                continue  # close still inside range, keep watching
 
-            # Determine which side broke first this candle
-            # If both (gap candle), whichever is further from mother mid takes priority
-            if broke_high and broke_low:
-                mid = (setup.mother_high + setup.mother_low) / 2
-                direction = "LONG" if c["close"] > mid else "SHORT"
-            elif broke_high:
-                direction = "LONG"
-            else:
-                direction = "SHORT"
-
-            entry = setup.mother_high if direction == "LONG" else setup.mother_low
-            sl    = setup.mother_low  if direction == "LONG" else setup.mother_high
-            risk  = abs(entry - sl)
-
-            # Max risk % filter
-            if (risk / entry * 100) > MAX_RISK_PCT:
+            # Same candle closed both sides — impossible but guard anyway
+            if closed_above and closed_below:
+                setup_invalidated = True
                 break
 
-            # Trend filter — if breakout is against trend, invalidate entire setup
+            direction = "LONG" if closed_above else "SHORT"
+            sl        = setup.mother_low if direction == "LONG" else setup.mother_high
+            entry_level = setup.mother_high if direction == "LONG" else setup.mother_low
+            mother_risk = abs(entry_level - sl)
+
+            # Max risk % filter (on mother range)
+            if (mother_risk / entry_level * 100) > MAX_RISK_PCT:
+                setup_invalidated = True
+                break
+
+            # Trend filter — if close is against trend, setup dead
             if ema_map:
                 dt_key = pd.Timestamp(c["datetime"].date())
                 ema    = ema_map.get(dt_key)
                 if ema is not None:
-                    if direction == "LONG"  and entry < ema:
-                        setup_invalidated = True
-                        break   # setup dead — wrong direction breakout occurred
-                    if direction == "SHORT" and entry > ema:
-                        setup_invalidated = True
-                        break   # setup dead — wrong direction breakout occurred
+                    if direction == "LONG"  and entry_level < ema:
+                        setup_invalidated = True; break
+                    if direction == "SHORT" and entry_level > ema:
+                        setup_invalidated = True; break
 
             if setup_invalidated:
                 break
 
-            tgt = entry + 2 * risk if direction == "LONG" else entry - 2 * risk
-            signals.append(TradeSignal(setup, direction, entry, sl, tgt, k, c["datetime"]))
+            # Entry = next candle open (candle after close confirmation)
+            next_k = k + 1
+            if next_k >= n:
+                break
+            next_c = df.iloc[next_k]
+            if next_c["datetime"].date() != setup_date:
+                break
+            if not can_enter(next_c["datetime"]):
+                break
+
+            entry = float(next_c["open"])
+            risk  = abs(entry - sl)
+            tgt   = entry + 2 * risk if direction == "LONG" else entry - 2 * risk
+
+            signals.append(TradeSignal(setup, direction,
+                                       round(entry, 2),
+                                       round(sl, 2),
+                                       round(tgt, 2),
+                                       next_k,
+                                       next_c["datetime"]))
             break
+    return signals
+
+
+def generate_signals_live(df15: pd.DataFrame,
+                          setups: list[InsideBarSetup],
+                          df1: pd.DataFrame,
+                          ema_map: dict | None = None) -> list[TradeSignal]:
+    """
+    Live mode signal generation using 1-min candles for confirmation.
+    After baby 15-min closes:
+    - Watch 1-min candles for BREAKOUT_WINDOW × 15 minutes
+    - Signal = first 1-min candle that CLOSES above mother high / below mother low
+    - Entry  = next 1-min candle OPEN
+    - SL     = mother low/high (fixed)
+    - Target = entry + 2 × (entry - SL)
+    - If close is against trend → setup dead
+    """
+    signals  = []
+    if df1.empty:
+        return signals
+
+    for setup in setups:
+        setup_date  = setup.timestamp.date()
+        watch_start = setup.timestamp + pd.Timedelta(minutes=1)
+        watch_end   = min(
+            setup.timestamp + pd.Timedelta(minutes=15 * BREAKOUT_WINDOW),
+            pd.Timestamp(setup_date.year, setup_date.month, setup_date.day,
+                         NO_ENTRY_AFTER.hour, NO_ENTRY_AFTER.minute)
+        )
+
+        mask = (
+            (df1["datetime"] >= watch_start) &
+            (df1["datetime"] <= watch_end) &
+            (df1["datetime"].dt.date == setup_date)
+        )
+        watch = df1[mask].reset_index(drop=True)
+        invalidated = False
+
+        for idx, c1 in watch.iterrows():
+            if not can_enter(c1["datetime"]): break
+
+            closed_above = float(c1["close"]) > setup.mother_high
+            closed_below = float(c1["close"]) < setup.mother_low
+
+            if not closed_above and not closed_below:
+                continue  # still inside, keep watching
+
+            if closed_above and closed_below:
+                invalidated = True; break
+
+            direction   = "LONG" if closed_above else "SHORT"
+            sl          = setup.mother_low  if direction == "LONG" else setup.mother_high
+            entry_level = setup.mother_high if direction == "LONG" else setup.mother_low
+            mother_risk = abs(entry_level - sl)
+
+            if (mother_risk / entry_level * 100) > MAX_RISK_PCT:
+                invalidated = True; break
+
+            if ema_map:
+                dt_key = pd.Timestamp(c1["datetime"].date())
+                ema    = ema_map.get(dt_key)
+                if ema is not None:
+                    if direction == "LONG"  and entry_level < ema: invalidated = True; break
+                    if direction == "SHORT" and entry_level > ema: invalidated = True; break
+
+            if invalidated: break
+
+            # Entry = next 1-min candle open
+            if idx + 1 < len(watch):
+                next_c     = watch.iloc[idx + 1]
+                entry      = float(next_c["open"])
+                entry_time = next_c["datetime"]
+            else:
+                entry      = float(c1["close"])
+                entry_time = c1["datetime"]
+
+            if not can_enter(entry_time): break
+
+            risk = abs(entry - sl)
+            tgt  = entry + 2 * risk if direction == "LONG" else entry - 2 * risk
+
+            # Find approximate 15-min candle index for this signal
+            sig_15m_idx = setup.baby_idx + 1
+
+            signals.append(TradeSignal(
+                setup, direction,
+                round(entry, 2),
+                round(sl, 2),
+                round(tgt, 2),
+                sig_15m_idx,
+                pd.Timestamp(entry_time),
+            ))
+            break
+
+        if invalidated:
+            continue
+
     return signals
 
 
@@ -783,6 +920,7 @@ class DemoEngine:
 
 _defaults: dict = dict(
     spot_df=None, ce_df=None, pe_df=None,
+    spot_1m_df=None,
     ce_symbol=None, pe_symbol=None, atm_strike=None, expiry=None,
     setups=[], signals=[], ema_map={},
     engine_spot=DemoEngine(), engine_ce=DemoEngine(), engine_pe=DemoEngine(),
@@ -810,11 +948,23 @@ def log(msg: str, level: str = "INFO"):
 def _apply_data(data: dict):
     for k, v in data.items():
         st.session_state[k] = v
-    df = st.session_state.spot_df
+    df      = st.session_state.spot_df
+    df1     = st.session_state.get("spot_1m_df")
     ema_map = compute_ema20(df)
     st.session_state.ema_map = ema_map
-    st.session_state.setups  = detect_inside_bar(df)
-    st.session_state.signals = generate_signals(df, st.session_state.setups, ema_map)
+    setups = detect_inside_bar(df)
+    st.session_state.setups = setups
+
+    # Live mode with 1-min data → use 1-min close confirmation
+    # Demo mode or no 1-min data → use standard 15-min logic
+    is_live = not st.session_state.get("demo_mode", True)
+    if is_live and df1 is not None and not df1.empty:
+        signals = generate_signals_live(df, setups, df1, ema_map)
+        log(f"Live signals: {len(signals)} (1-min close confirmation)", "INFO")
+    else:
+        signals = generate_signals(df, setups, ema_map)
+
+    st.session_state.signals = signals
     st.session_state.candle_cursor = 2
     _reset_engines()
 
