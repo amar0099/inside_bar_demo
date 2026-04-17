@@ -894,6 +894,42 @@ class DemoEngine:
             self.active_trades.remove(t)
             self.closed_trades.append(t)
 
+    def update_from_1min(self, df1: pd.DataFrame):
+        """
+        Live mode: process all 1-min candles for active trades.
+        Called after Refresh Signals to update SL/target/time exits.
+        """
+        if df1.empty or not self.active_trades:
+            return
+        for _, c1 in df1.iterrows():
+            if not self.active_trades:
+                break
+            done = []
+            for t in self.active_trades:
+                sig  = t.signal
+                c_hi = float(c1["high"])
+                c_lo = float(c1["low"])
+                ct   = c1["datetime"]
+                # Only process candles after entry time
+                if ct <= t.entry_time:
+                    continue
+                if must_close(ct):
+                    self._close(t, float(c1["open"]), ct, "TIME_EXIT")
+                    done.append(t); continue
+                if sig.direction == "LONG":
+                    if c_lo <= sig.stop_loss:
+                        self._close(t, sig.stop_loss, ct, "SL_HIT");    done.append(t)
+                    elif c_hi >= sig.target:
+                        self._close(t, sig.target,    ct, "TARGET_HIT"); done.append(t)
+                else:
+                    if c_hi >= sig.stop_loss:
+                        self._close(t, sig.stop_loss, ct, "SL_HIT");    done.append(t)
+                    elif c_lo <= sig.target:
+                        self._close(t, sig.target,    ct, "TARGET_HIT"); done.append(t)
+            for t in done:
+                self.active_trades.remove(t)
+                self.closed_trades.append(t)
+
     def _close(self, t: LiveTrade, price: float, ts: pd.Timestamp, reason: str):
         t.exit_price  = price
         t.exit_time   = ts
@@ -1254,11 +1290,28 @@ with st.sidebar:
                         cfg    = INSTRUMENT_CONFIG[st.session_state.get("selected_instrument","Nifty")]
                         df1    = fetch_ohlc_1min_live(fyers, cfg["spot_symbol"])
                         st.session_state.spot_1m_df = df1
+
+                        # Rescan signals on updated 1-min
                         ema_map = st.session_state.ema_map
                         setups  = st.session_state.setups
                         signals = generate_signals_live(df, setups, df1, ema_map)
                         st.session_state.signals = signals
-                        log(f"Signals refreshed: {len(signals)} found (1-min)", "INFO")
+
+                        # Update active trade SL/TGT exits on 1-min candles
+                        st.session_state.engine_spot.update_from_1min(df1)
+                        st.session_state.engine_ce.update_from_1min(df1)
+                        st.session_state.engine_pe.update_from_1min(df1)
+
+                        # Update consecutive SL counter from newly closed trades
+                        for t in st.session_state.engine_spot.closed_trades:
+                            if t.exit_reason == "SL_HIT":
+                                st.session_state.consec_sl_count += 1
+                            else:
+                                st.session_state.consec_sl_count = 0
+
+                        log(f"Refreshed: {len(signals)} signals | "
+                            f"Active: {len(st.session_state.engine_spot.active_trades)} | "
+                            f"Closed: {len(st.session_state.engine_spot.closed_trades)}", "INFO")
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
