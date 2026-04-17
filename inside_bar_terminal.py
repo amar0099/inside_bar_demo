@@ -579,11 +579,15 @@ def generate_signals(df: pd.DataFrame,
     - Same-day breakout only
     - Max risk <= MAX_RISK_PCT (1.5%) of entry
     - Trend filter: LONG only above EMA20, SHORT only below EMA20
+    - If ANY breakout fires against the trend, the entire setup is dead.
+      Do not re-enter on reversal — wait for a fresh inside bar.
     """
     signals = []
     n = len(df)
     for setup in setups:
         setup_date = df.iloc[setup.baby_idx]["datetime"].date()
+        setup_invalidated = False
+
         for k in range(setup.baby_idx + 1,
                        min(setup.baby_idx + BREAKOUT_WINDOW + 1, n)):
             c = df.iloc[k]
@@ -592,11 +596,22 @@ def generate_signals(df: pd.DataFrame,
             if not can_enter(c["datetime"]):
                 break
 
-            direction = None
-            if c["high"] > setup.mother_high:   direction = "LONG"
-            elif c["low"] < setup.mother_low:   direction = "SHORT"
-            if not direction:
-                continue
+            # Check if price has broken either side of mother bar
+            broke_high = c["high"] > setup.mother_high
+            broke_low  = c["low"]  < setup.mother_low
+
+            if not broke_high and not broke_low:
+                continue  # no breakout yet, keep watching
+
+            # Determine which side broke first this candle
+            # If both (gap candle), whichever is further from mother mid takes priority
+            if broke_high and broke_low:
+                mid = (setup.mother_high + setup.mother_low) / 2
+                direction = "LONG" if c["close"] > mid else "SHORT"
+            elif broke_high:
+                direction = "LONG"
+            else:
+                direction = "SHORT"
 
             entry = setup.mother_high if direction == "LONG" else setup.mother_low
             sl    = setup.mother_low  if direction == "LONG" else setup.mother_high
@@ -606,14 +621,20 @@ def generate_signals(df: pd.DataFrame,
             if (risk / entry * 100) > MAX_RISK_PCT:
                 break
 
-            # Trend filter — only trade in direction of 20-day EMA
-            # If filtered, break entirely — setup is dead, no reversal entry
+            # Trend filter — if breakout is against trend, invalidate entire setup
             if ema_map:
                 dt_key = pd.Timestamp(c["datetime"].date())
                 ema    = ema_map.get(dt_key)
                 if ema is not None:
-                    if direction == "LONG"  and entry < ema: break
-                    if direction == "SHORT" and entry > ema: break
+                    if direction == "LONG"  and entry < ema:
+                        setup_invalidated = True
+                        break   # setup dead — wrong direction breakout occurred
+                    if direction == "SHORT" and entry > ema:
+                        setup_invalidated = True
+                        break   # setup dead — wrong direction breakout occurred
+
+            if setup_invalidated:
+                break
 
             tgt = entry + 2 * risk if direction == "LONG" else entry - 2 * risk
             signals.append(TradeSignal(setup, direction, entry, sl, tgt, k, c["datetime"]))
