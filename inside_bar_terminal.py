@@ -607,14 +607,13 @@ def generate_signals(df: pd.DataFrame,
                 break
 
             # Trend filter — only trade in direction of 20-day EMA
-            # If filtered, use continue (not break) so we keep scanning for
-            # a failed BO reversal on the next candle within the window
+            # If filtered, break entirely — setup is dead, no reversal entry
             if ema_map:
                 dt_key = pd.Timestamp(c["datetime"].date())
                 ema    = ema_map.get(dt_key)
                 if ema is not None:
-                    if direction == "LONG"  and entry < ema: continue
-                    if direction == "SHORT" and entry > ema: continue
+                    if direction == "LONG"  and entry < ema: break
+                    if direction == "SHORT" and entry > ema: break
 
             tgt = entry + 2 * risk if direction == "LONG" else entry - 2 * risk
             signals.append(TradeSignal(setup, direction, entry, sl, tgt, k, c["datetime"]))
