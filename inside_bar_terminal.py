@@ -996,23 +996,29 @@ with st.sidebar:
     st.session_state.demo_mode = is_demo
 
     st.markdown('<div class="section-label">Instrument</div>', unsafe_allow_html=True)
+    # Ensure selected_instrument is initialised before the widget reads it
+    if "selected_instrument" not in st.session_state:
+        st.session_state.selected_instrument = "Nifty"
+
+    prev_instrument = st.session_state.selected_instrument
     instrument = st.selectbox(
         "Select Instrument",
         options=list(INSTRUMENT_CONFIG.keys()),
-        index=list(INSTRUMENT_CONFIG.keys()).index(
-            st.session_state.get("selected_instrument", "Nifty")),
+        index=list(INSTRUMENT_CONFIG.keys()).index(prev_instrument),
         label_visibility="collapsed",
+        key="instrument_selectbox",
     )
-    if instrument != st.session_state.get("selected_instrument"):
+    if instrument != prev_instrument:
         st.session_state.selected_instrument = instrument
-        # Reset data when instrument changes
-        st.session_state.spot_df    = None
-        st.session_state.ce_df      = None
-        st.session_state.pe_df      = None
-        st.session_state.setups     = []
-        st.session_state.signals    = []
+        # Reset all data when instrument changes
+        st.session_state.spot_df     = None
+        st.session_state.ce_df       = None
+        st.session_state.pe_df       = None
+        st.session_state.setups      = []
+        st.session_state.signals     = []
         st.session_state.backtest_df = None
         _reset_engines()
+        st.rerun()
 
     st.markdown('<div class="section-label">Data Controls</div>', unsafe_allow_html=True)
 
@@ -1384,7 +1390,10 @@ with tab5:
                 if val == "SHORT": return "color:#c0392b;font-weight:700"
                 return ""
 
-            styled = sc_df.style                 .applymap(color_role,      subset=["Role"])                 .applymap(color_direction, subset=["Direction"])
+            try:
+                styled = sc_df.style                     .map(color_role,      subset=["Role"])                     .map(color_direction, subset=["Direction"])
+            except AttributeError:
+                styled = sc_df.style                     .applymap(color_role,      subset=["Role"])                     .applymap(color_direction, subset=["Direction"])
 
             st.dataframe(styled, use_container_width=True, height=520)
 
