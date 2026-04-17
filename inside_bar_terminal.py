@@ -92,7 +92,7 @@ MARKET_OPEN_TIME   = dtime(9, 15)
 MARKET_CLOSE_TIME  = dtime(15, 15)
 BREAKOUT_WINDOW    = 2     # candles after baby to look for breakout
 MIN_RISK_PTS       = 100   # skip setups with mother bar range < 100 pts
-MAX_RISK_PCT       = 1.5   # skip setups with risk > 1.5% of entry price
+MAX_RISK_PCT       = 0.5   # skip setups with risk > 0.5% of entry price
 CONSEC_SL_LIMIT    = 2     # stop trading day after N consecutive SL hits
 
 def is_first_candle(dt: pd.Timestamp) -> bool:
@@ -1256,7 +1256,7 @@ with st.sidebar:
         '<span style="color:#9ab8d0">─────────────────────</span><br>'
         '<b style="color:#1a56db">FILTERS</b><br>'
         '▸ Min risk &nbsp;: 100 pts<br>'
-        '▸ Max risk &nbsp;: 1.5% of entry<br>'
+        '▸ Max risk &nbsp;: 0.5% of entry<br>'
         '▸ Trend &nbsp;&nbsp;&nbsp;: EMA20 (daily)<br>'
         '▸ Consec SL : Stop after 2<br>'
         '▸ Dedup &nbsp;&nbsp;&nbsp;: Widest bar wins'
