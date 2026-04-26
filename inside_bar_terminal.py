@@ -266,8 +266,14 @@ def get_fyers_client():
 
 
 def fetch_ohlc_live(fyers, symbol: str, days_back: int = 3) -> pd.DataFrame:
+    """
+    Fetch 15-min OHLC. `days_back` is the number of TRADING days of history to keep
+    after clipping. To satisfy the v2 regime gate (10-day rolling avg range), pass
+    days_back >= 12 for the spot symbol.
+    """
     today     = date.today()
-    from_date = today - timedelta(days=days_back * 2 + 5)
+    # Pull a wider calendar window so we end up with enough TRADING days after weekends/holidays
+    from_date = today - timedelta(days=days_back * 2 + 7)
     resp = fyers.history(data={
         "symbol":     symbol,
         "resolution": "15",
@@ -286,8 +292,14 @@ def fetch_ohlc_live(fyers, symbol: str, days_back: int = 3) -> pd.DataFrame:
         .dt.tz_localize(None)
     )
     df = df.drop(columns=["ts"]).sort_values("datetime").reset_index(drop=True)
-    cutoff = pd.Timestamp(today - timedelta(days=days_back * 2))
-    return df[df["datetime"] >= cutoff].reset_index(drop=True)
+
+    # Keep only the last `days_back` UNIQUE TRADING DAYS in the result
+    # (this avoids the previous bug where a calendar-day cutoff under-counted history).
+    if not df.empty:
+        unique_days = sorted(df["datetime"].dt.date.unique())
+        keep_days = unique_days[-days_back:] if len(unique_days) > days_back else unique_days
+        df = df[df["datetime"].dt.date.isin(keep_days)].reset_index(drop=True)
+    return df
 
 
 def fetch_ltp_live(fyers, symbol: str) -> float:
@@ -398,13 +410,17 @@ def load_live_data() -> dict:
         "client_id": fyers.client_id,
         "token":     fyers.token,
     }
-    spot_df    = fetch_ohlc_live(fyers, NIFTY_SPOT_SYMBOL, days_back=3)
+    # Spot: pull at least REGIME_LOOKBACK_DAYS + buffer for the regime gate
+    spot_df    = fetch_ohlc_live(fyers, NIFTY_SPOT_SYMBOL,
+                                 days_back=REGIME_LOOKBACK_DAYS + 5)
     ltp        = float(spot_df["close"].iloc[-1])
     atm_strike = round_to_strike(ltp)
     expiry_code = get_nearest_expiry_code(fyers)
     ce_sym     = build_option_symbol(atm_strike, "CE", expiry_code)
     pe_sym     = build_option_symbol(atm_strike, "PE", expiry_code)
 
+    # Options: shorter window is fine — option contracts only have meaningful data
+    # back to listing, and the regime gate runs on spot, not options.
     ce_df = fetch_ohlc_live(fyers, ce_sym, days_back=3)
     pe_df = fetch_ohlc_live(fyers, pe_sym, days_back=3)
 
@@ -484,7 +500,7 @@ def generate_sim_option(spot_df: pd.DataFrame, strike: int, opt_type: str,
 
 def load_sim_data() -> dict:
     seed       = int(time.time()) % 9999
-    spot_df    = generate_sim_banknifty(days=2, seed=seed)
+    spot_df    = generate_sim_banknifty(days=REGIME_LOOKBACK_DAYS + 5, seed=seed)
     ltp        = float(spot_df["close"].iloc[-1])
     atm_strike = round_to_strike(ltp)
     expiry     = get_next_thursday()
@@ -1081,12 +1097,19 @@ with st.sidebar:
         try:
             target_d = st.session_state.spot_df["datetime"].iloc[-1].date()
             ok, avg = regime_allowed(st.session_state.spot_df, target_d)
+            # Count available prior trading days for diagnostics
+            daily_for_count = compute_daily_ranges(st.session_state.spot_df)
+            prior_days = len(daily_for_count[daily_for_count["date"] < target_d])
             if avg is None:
-                pill_color = "#5a7a9a"; pill_bg = "#eef2f7"; status = "REGIME: insufficient history"
+                pill_color = "#5a7a9a"; pill_bg = "#eef2f7"
+                status = (f"REGIME: need {REGIME_LOOKBACK_DAYS} prior days · "
+                          f"have {prior_days} · trading allowed")
             elif ok:
-                pill_color = "#0d6e3e"; pill_bg = "#dff6e6"; status = f"REGIME OK · avg {avg:.2f}%"
+                pill_color = "#0d6e3e"; pill_bg = "#dff6e6"
+                status = f"REGIME OK · avg {avg:.2f}% (≤ {REGIME_MAX_AVG_RANGE:.1f}%)"
             else:
-                pill_color = "#a32d2d"; pill_bg = "#fbe4e4"; status = f"REGIME BLOCKED · avg {avg:.2f}%"
+                pill_color = "#a32d2d"; pill_bg = "#fbe4e4"
+                status = f"REGIME BLOCKED · avg {avg:.2f}% (> {REGIME_MAX_AVG_RANGE:.1f}%)"
             st.markdown(
                 f'<div style="margin-top:8px;padding:6px 10px;border-radius:3px;'
                 f'background:{pill_bg};color:{pill_color};font-family:IBM Plex Mono;'
