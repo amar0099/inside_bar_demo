@@ -1,5 +1,5 @@
 """
-Inside Bar Breakout Terminal — Nifty 15 Min · v2 Spec
+Inside Bar Breakout Terminal — BankNifty 15 Min · v2 Spec
 Single-file Streamlit app · Fyers API v3 · Streamlit Secrets
 
 v2 changes from previous version:
@@ -10,6 +10,7 @@ v2 changes from previous version:
   • Force-close time extended from 15:10 to 15:15
   • Daily circuit breaker: stop after 2 consecutive SL hits
   • One open trade at a time (no overlapping positions)
+  • Spot instrument switched from Nifty 50 to BankNifty
 
 Backtested 2021-2026 on BankNifty 1-min:
   +7,294 net pts · PF 1.19 · Recovery factor 3.93 · all years profitable
@@ -34,7 +35,7 @@ import pyotp
 # ═══════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Inside Bar Terminal · v2",
+    page_title="Inside Bar Terminal · BankNifty · v2",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -81,8 +82,8 @@ hr { border-color:#dde3ec !important; }
 #  CONSTANTS & TIME RULES — v2 Specification
 # ═══════════════════════════════════════════════════════════
 
-NIFTY_SPOT_SYMBOL  = "NSE:NIFTY50-INDEX"
-NIFTY_STRIKE_STEP  = 50
+NIFTY_SPOT_SYMBOL  = "NSE:NIFTYBANK-INDEX"
+NIFTY_STRIKE_STEP  = 100   # BankNifty strikes step in 100s
 
 # Time rules
 NO_ENTRY_AFTER     = dtime(15, 0)
@@ -298,7 +299,7 @@ def fetch_ltp_live(fyers, symbol: str) -> float:
 
 _MONTHS = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
 
-NIFTY_LOT = 75
+NIFTY_LOT = 30   # BankNifty lot size
 
 
 def round_to_strike(price: float, step: int = NIFTY_STRIKE_STEP) -> int:
@@ -307,7 +308,7 @@ def round_to_strike(price: float, step: int = NIFTY_STRIKE_STEP) -> int:
 
 @st.cache_resource
 def _fetch_expiries_from_fyers(client_id, token):
-    """Fetch Nifty expiry codes from Fyers optionchain. Returns (dict, error)."""
+    """Fetch BankNifty expiry codes from Fyers optionchain. Returns (dict, error)."""
     from collections import defaultdict
     import json
     try:
@@ -350,7 +351,7 @@ def _fetch_expiries_from_fyers(client_id, token):
 
 
 def get_nearest_expiry_code(fyers_client) -> str:
-    """Return the nearest upcoming Nifty expiry code from Fyers optionchain."""
+    """Return the nearest upcoming BankNifty expiry code from Fyers optionchain."""
     expiries, err = _fetch_expiries_from_fyers(
         fyers_client.client_id, fyers_client.token)
     if not expiries:
@@ -377,16 +378,16 @@ def _fallback_expiry_code() -> str:
 
 def build_option_symbol(strike: int, opt_type: str, expiry_code: str) -> str:
     """
-    Mirrors dashboard.py build_symbol exactly.
-    Monthly "26APR"  → NSE:NIFTY26APR24100CE
-    Weekly  "260423" → NSE:NIFTY2642324100CE
+    Build BankNifty option symbol for Fyers.
+    Monthly "26APR"  → NSE:BANKNIFTY26APR48000CE
+    Weekly  "260423" → NSE:BANKNIFTY2642348000CE
     """
     ot   = "CE" if opt_type.upper() in ("C", "CE") else "PE"
     code = expiry_code.strip().upper()
     if any(c.isalpha() for c in code):
-        return f"NSE:NIFTY{code}{strike}{ot}"
+        return f"NSE:BANKNIFTY{code}{strike}{ot}"
     yy, mm, dd = code[0:2], code[2:4], code[4:6]
-    return f"NSE:NIFTY{yy}{int(mm)}{dd}{strike}{ot}"
+    return f"NSE:BANKNIFTY{yy}{int(mm)}{dd}{strike}{ot}"
 
 
 def load_live_data() -> dict:
@@ -435,9 +436,10 @@ def _fallback_expiry_code() -> str:
 #  SIMULATED DATA
 # ═══════════════════════════════════════════════════════════
 
-def generate_sim_nifty(days: int = 2, seed: int | None = None) -> pd.DataFrame:
+def generate_sim_banknifty(days: int = 2, seed: int | None = None) -> pd.DataFrame:
+    """Synthetic 15-min BankNifty candles. Base ≈ 50k, larger tick magnitudes than Nifty."""
     rng = np.random.default_rng(seed if seed is not None else int(time.time()) % 9999)
-    base = 22350.0
+    base = 50000.0
     records = []
     today = date.today()
     trading_days: list[date] = []
@@ -452,15 +454,15 @@ def generate_sim_nifty(days: int = 2, seed: int | None = None) -> pd.DataFrame:
         start = datetime(td.year, td.month, td.day, 9, 15)
         for i in range(25):
             dt  = start + timedelta(minutes=15 * i)
-            o   = base + rng.standard_normal() * 8
-            h   = o + abs(rng.standard_normal() * 14)
-            l   = o - abs(rng.standard_normal() * 14)
+            o   = base + rng.standard_normal() * 18
+            h   = o + abs(rng.standard_normal() * 32)
+            l   = o - abs(rng.standard_normal() * 32)
             c   = l + (h - l) * rng.uniform(0.2, 0.8)
             vol = int(rng.uniform(50_000, 200_000))
             records.append(dict(datetime=pd.Timestamp(dt),
                                 open=round(o,2), high=round(h,2),
                                 low=round(l,2),  close=round(c,2), volume=vol))
-            base = c + rng.standard_normal() * 5
+            base = c + rng.standard_normal() * 12
 
     return pd.DataFrame(records)
 
@@ -474,14 +476,15 @@ def generate_sim_option(spot_df: pd.DataFrame, strike: int, opt_type: str,
             intrinsic = np.maximum(df[col].values - strike, 0)
         else:
             intrinsic = np.maximum(strike - df[col].values, 0)
-        tv        = rng.uniform(40, 140, len(df))
+        # BankNifty option premiums tend to run higher than Nifty
+        tv        = rng.uniform(80, 280, len(df))
         df[col]   = np.round(intrinsic + tv, 2)
     return df
 
 
 def load_sim_data() -> dict:
     seed       = int(time.time()) % 9999
-    spot_df    = generate_sim_nifty(days=2, seed=seed)
+    spot_df    = generate_sim_banknifty(days=2, seed=seed)
     ltp        = float(spot_df["close"].iloc[-1])
     atm_strike = round_to_strike(ltp)
     expiry     = get_next_thursday()
@@ -1098,7 +1101,7 @@ with st.sidebar:
         exp_str = str(st.session_state.expiry) if st.session_state.expiry else "—"
         st.markdown(
             f'<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:#1a1a2e;line-height:2.1;">'
-            f'NIFTY 50 SPOT<br>'
+            f'BANKNIFTY SPOT<br>'
             f'<span style="color:#3ddc84">ATM CE &nbsp;{st.session_state.atm_strike}</span><br>'
             f'<span style="color:#ff6b6b">ATM PE &nbsp;{st.session_state.atm_strike}</span><br>'
             f'<span style="color:#5a7a9a">Expiry : {exp_str}</span>'
@@ -1128,7 +1131,7 @@ label = "SIMULATED" if st.session_state.demo_mode else "LIVE"
 st.markdown(
     f'<div style="font-family:IBM Plex Mono;font-size:1.1rem;color:#0d1117;'
     f'font-weight:600;padding:4px 0 10px 0;">'
-    f'{dot} NIFTY &nbsp;'
+    f'{dot} BANKNIFTY &nbsp;'
     f'<span style="color:#5a7a9a;font-size:0.85rem;font-weight:400;">'
     f'INSIDE BAR BREAKOUT &nbsp;·&nbsp; 15 MIN &nbsp;·&nbsp; {label}</span></div>',
     unsafe_allow_html=True,
@@ -1142,7 +1145,7 @@ if df_s is not None:
     chg   = ltp - prev
     sm    = st.session_state.engine_spot.summary()
     m1,m2,m3,m4,m5,m6 = st.columns(6)
-    m1.metric("NIFTY LTP",    f"{ltp:,.2f}", f"{chg:+.2f}")
+    m1.metric("BANKNIFTY LTP",    f"{ltp:,.2f}", f"{chg:+.2f}")
     m2.metric("Patterns",     str(len(st.session_state.setups)))
     m3.metric("Signals",      str(len(st.session_state.signals)))
     m4.metric("Trades Closed",str(sm["total"]))
@@ -1194,11 +1197,11 @@ with tab1:
         inst = st.selectbox("Chart", ["SPOT", "ATM CE", "ATM PE"],
                             label_visibility="collapsed")
         chart_map = {
-            "SPOT":   (df_s, f"NIFTY 50 SPOT — 15 MIN"),
+            "SPOT":   (df_s, f"BANKNIFTY SPOT — 15 MIN"),
             "ATM CE": (df_s if st.session_state.ce_df is None else st.session_state.ce_df,
-                       f"NIFTY {st.session_state.atm_strike} CE — 15 MIN"),
+                       f"BANKNIFTY {st.session_state.atm_strike} CE — 15 MIN"),
             "ATM PE": (df_s if st.session_state.pe_df is None else st.session_state.pe_df,
-                       f"NIFTY {st.session_state.atm_strike} PE — 15 MIN"),
+                       f"BANKNIFTY {st.session_state.atm_strike} PE — 15 MIN"),
         }
         c_df, c_title = chart_map[inst]
 
