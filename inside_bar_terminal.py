@@ -1560,16 +1560,19 @@ with tab2:
             pnl = t.pnl_pts or 0
             cc  = "trade-card-win" if pnl >= 0 else "trade-card-loss"
             rc  = {"TARGET_HIT":"#3ddc84","SL_HIT":"#ff6b6b","TIME_EXIT":"#f0b840"}.get(t.exit_reason,"#7eb8f7")
+            entry_dt_str = t.entry_time.strftime("%d-%b %H:%M") if t.entry_time else "—"
+            exit_dt_str = t.exit_time.strftime("%d-%b %H:%M") if t.exit_time else "—"
             st.markdown(
                 f'<div class="trade-card {cc}">'
                 f'<span style="background:{"#0d3320" if t.signal.direction=="LONG" else "#330d0d"};'
                 f'color:{"#3ddc84" if t.signal.direction=="LONG" else "#ff6b6b"};'
                 f'padding:2px 8px;border-radius:2px;font-size:0.7rem;">{t.signal.direction}</span> &nbsp;'
+                f'<span style="color:#888780;font-size:0.68rem;">{entry_dt_str}</span> &nbsp;'
                 f'Entry <b>{t.entry_price:.2f}</b>'
-                f' @ {t.entry_time.strftime("%H:%M") if t.entry_time else "—"} →'
-                f' Exit <b>{t.exit_price:.2f}</b>'
-                f' @ {t.exit_time.strftime("%H:%M") if t.exit_time else "—"} &nbsp;'
-                f'<span style="color:{rc};font-size:0.68rem">{t.exit_reason}</span> &nbsp;'
+                f' → '
+                f'<span style="color:#888780;font-size:0.68rem;">{exit_dt_str}</span> &nbsp;'
+                f'Exit <b>{t.exit_price:.2f}</b>'
+                f' &nbsp; <span style="color:{rc};font-size:0.68rem">{t.exit_reason}</span> &nbsp;'
                 f'P&L <b style="color:{"#3ddc84" if pnl>=0 else "#ff6b6b"}">{pnl:+.2f} pts</b>'
                 f'</div>',
                 unsafe_allow_html=True,
@@ -1633,8 +1636,8 @@ with tab3:
         st.plotly_chart(fig_bt, use_container_width=True, config={"displayModeBar": False})
 
         dbt = bt.copy()
-        dbt["entry_time"] = pd.to_datetime(dbt["entry_time"]).dt.strftime("%d/%m %H:%M")
-        dbt["exit_time"]  = pd.to_datetime(dbt["exit_time"]).dt.strftime("%d/%m %H:%M")
+        dbt["entry_time"] = pd.to_datetime(dbt["entry_time"]).dt.strftime("%d-%b %H:%M")
+        dbt["exit_time"]  = pd.to_datetime(dbt["exit_time"]).dt.strftime("%d-%b %H:%M")
         st.dataframe(
             dbt[["entry_time","exit_time","direction",
                  "entry_price","sl","target","exit_price","exit_reason","pnl_pts"]],
